@@ -140,13 +140,14 @@ class LogStash::Inputs::S3File_Via_Sqs < LogStash::Inputs::Threadable
         @poller.poll(polling_options) do |messages, stats|
           counter ||= messages.size
           break if stop?
+          s3_locations = []
           if MAX_MESSAGES_TO_FETCH > 1
             @logger.info("Start Polling #{messages.size} messages from SQS - #{Time.now}")
             messages.each { |message|
               counter = (counter - 1)
               @logger.debug("now processing message number #{counter}")
               break if stop?
-              s3_locations = parse_sqs(message)
+              s3_locations = s3_locations + parse_sqs(message)
             }
           else
             s3_locations = parse_sqs(messages)
@@ -346,13 +347,19 @@ class LogStash::Inputs::S3File_Via_Sqs < LogStash::Inputs::Threadable
     File.open(filename, 'rb') do |file|
       file.each(&block)
     end
+    #remove the file from the pod
+    system("rm #{filename}")
   end
 
   def read_gzip_file(filename, block)
     begin
-      Zlib::GzipReader.open(filename) do |decoder|
-        decoder.each_line { |line| block.call(line) }
-      end
+      #unzip the file localy in etc/logstash folder
+      command = "gunzip --force #{filename}"
+      string_size = filename.length * -1
+      log_file = filename[string_size..-4]
+      success = system(command)
+      #success && $?.exitstatus == 0
+      read_plain_file(log_file, block)
     rescue Zlib::Error, Zlib::GzipFile::Error => e
       @logger.error("Gzip codec: We cannot uncompress the gzip file", :filename => filename)
       raise e
