@@ -107,7 +107,7 @@ class LogStash::Inputs::S3File_Via_Sqs < LogStash::Inputs::Threadable
 
     # Messages are automatically deleted from the queue at the end of the given block.
     @poller = Aws::SQS::QueuePoller.new(queue_url, :client => @sqs)
-    require 'pry'; binding.pry
+    #require 'pry'; binding.pry
 
     rescue Aws::SQS::Errors::ServiceError, Aws::S3::Errors::ServiceError, Aws::STS::Errors::ServiceError => e
       @logger.error("AWS init error: ", :error => e)
