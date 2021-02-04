@@ -5,8 +5,8 @@ Gem::Specification.new do |s|
   s.licenses        = ['Apache License (2.0)']
   s.summary         = "Stream events from files using S3 events to send filenames to a Amazon Simple Queue Service (SQS)."
   s.description     = "This gem is a logstash plugin required to be installed on top of the Logstash core pipeline using $LS_HOME/bin/plugin install gemname. This gem is not a stand-alone program"
-  s.authors         = ["Ami Mahloof"]
-  s.email           = 'ami.mahloof@gmail.com'
+  s.authors         = ["Aryeh Schechter"]
+  s.email           = 'server@glide.me'
   s.homepage        = "https://github.com/innovia/logstash-input-s3file_via_sqs"
   s.require_paths = ["lib"]
 
