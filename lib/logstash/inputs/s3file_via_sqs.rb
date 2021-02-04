@@ -13,7 +13,6 @@ require "stud/temporary"
 
 class LogStash::Inputs::S3File_Via_Sqs < LogStash::Inputs::Threadable
   include LogStash::PluginMixins::AwsConfig::V2
-
   MAX_TIME_BEFORE_GIVING_UP = 60
   MAX_MESSAGES_TO_FETCH = 10 # Between 1-10 in the AWS-SDK doc
   SENT_TIMESTAMP = "SentTimestamp"
@@ -42,7 +41,7 @@ class LogStash::Inputs::S3File_Via_Sqs < LogStash::Inputs::Threadable
   config :aws_queue_owner_id, :validate => :string
 
   # The AWS Region
-  config :region, :validate => LogStash::PluginMixins::AwsConfig::REGIONS_ENDPOINT, :default => LogStash::PluginMixins::AwsConfig::US_EAST_1
+  config :region, :validate =>:string, :default => LogStash::PluginMixins::AwsConfig::US_EAST_1
 
   # This plugin uses the AWS SDK and supports several ways to get credentials, which will be tried in this order...
   # 1. Static configuration, using `access_key_id` and `secret_access_key` params in logstash plugin config
@@ -91,10 +90,6 @@ class LogStash::Inputs::S3File_Via_Sqs < LogStash::Inputs::Threadable
     setup_tmp_dir
     # aws config options
     # region, access_key_id, secret_access_key, use_ssl, aws_credentials_file
-    if @logger.level == :debug
-      require 'logger'
-      Aws.config.update(:logger => Logger.new($stdout))
-    end
 
     if @assume_role_arn
       @sts = Aws::STS::Client.new(aws_options_hash)
@@ -140,20 +135,20 @@ class LogStash::Inputs::S3File_Via_Sqs < LogStash::Inputs::Threadable
         @poller.poll(polling_options) do |messages, stats|
           counter ||= messages.size
           break if stop?
+          s3_locations = []
           if MAX_MESSAGES_TO_FETCH > 1
             @logger.info("Start Polling #{messages.size} messages from SQS - #{Time.now}")
             messages.each { |message|
               counter = (counter - 1)
-              @logger.debug("now processing message number #{counter}")
+              @logger.info("now processing message number #{counter}")
               break if stop?
-              s3_locations = parse_sqs(message)
+              s3_locations = s3_locations + parse_sqs(message)
             }
           else
             s3_locations = parse_sqs(messages)
           end
 
-
-          @logger.debug("SQS Poller Stats:",
+          @logger.info("SQS Poller Stats:",
             :request_count => stats.request_count,
             :received_message_count => stats.received_message_count,
             :last_message_received_at => stats.last_message_received_at
@@ -167,18 +162,18 @@ class LogStash::Inputs::S3File_Via_Sqs < LogStash::Inputs::Threadable
   end # def process_files
 
   def parse_sqs(message)
-    @logger.debug("started processing sqs message #{message}")
+    @logger.info("started processing sqs message #{message}")
     s3_locations = []
 
     begin
       msg = JSON.parse(message.body)
       if msg.has_key?('Records')
         msg['Records'].each { |record|
-          @logger.debug("Message received at #{Time.now}")
+          @logger.info("Message received at #{Time.now}")
           key =  record['s3']['object']['key']
           bucket = record['s3']['bucket']['name']
           s3_loc = {:bucket => bucket, :key => key}
-          @logger.debug("Processing S3 file from s3://#{bucket}/#{key} @ #{Time.now}", s3_loc)
+          @logger.info("Processing S3 file from s3://#{bucket}/#{key} @ #{Time.now}", s3_loc)
           s3_locations << s3_loc
         }
       end
@@ -221,7 +216,7 @@ class LogStash::Inputs::S3File_Via_Sqs < LogStash::Inputs::Threadable
   def get_temp_credentials
         require 'pry'; binding.pry
 
-    @logger.debug("Getting temp credentials using the role: #{@assume_role_arn}")
+    @logger.info("Getting temp credentials using the role: #{@assume_role_arn}")
     role_credentials = Aws::AssumeRoleCredentials.new(
       client: @sts,
       role_arn: @assume_role_arn,
@@ -229,7 +224,7 @@ class LogStash::Inputs::S3File_Via_Sqs < LogStash::Inputs::Threadable
     )
 
     credentials_config = {credentials: role_credentials, region: @region}
-    @logger.debug("AWS AssumeRoleCredentials: #{credentials_config}")
+    @logger.info("AWS AssumeRoleCredentials: #{credentials_config}")
 
     @s3 = Aws::S3::Client.new(credentials_config)
     @sqs = Aws::SQS::Client.new(credentials_config)
@@ -267,17 +262,17 @@ class LogStash::Inputs::S3File_Via_Sqs < LogStash::Inputs::Threadable
   # @return [Boolean] True if the file was completely read, false otherwise.
   def process_local_log(queue, filename, s3_file_info)
     @logger.info("Processing downloaded file - Started at #{Time.now}" , :filename => filename)
-
+    count = 0
     metadata = {}
     # Currently codecs operates on bytes instead of stream.
     # So all IO stuff: decompression, reading need to be done in the actual
     # input and send as bytes to the codecs.
     read_file(filename) do |line|
       if stop?
-        @logger.warn("Logstash S3 input, stop reading in the middle of the file, we will read it again when logstash is started")
+        @logger.error("Logstash S3 input, stop reading in the middle of the file, we will read it again when logstash is started")
         return false
       end
-
+      count +=1
       @codec.decode(line) do |event|
         # We are making an assumption concerning cloudfront
         # log format, the user will use the plain or the line codec
@@ -289,28 +284,32 @@ class LogStash::Inputs::S3File_Via_Sqs < LogStash::Inputs::Threadable
         # unknown bytes in the log stream before doing a regexp match or
         # you will get a `Error: invalid byte sequence in UTF-8'
         if event_is_metadata?(event)
-          @logger.debug('Event is metadata, updating the current cloudfront metadata', :event => event)
+          @logger.error('Event is metadata, updating the current cloudfront metadata', :event => event)
           update_metadata(metadata, event)
         else
-          event['path'] = filename
-          event['s3_bucket'] = s3_file_info[:bucket]
-          event['s3_key'] = s3_file_info[:key]
-          event["cloudfront_version"] = metadata[:cloudfront_version] unless metadata[:cloudfront_version].nil?
-          event["cloudfront_fields"]  = metadata[:cloudfront_fields] unless metadata[:cloudfront_fields].nil?
+          event.set('path', filename)
+          event.set('s3_bucket', s3_file_info[:bucket])
+          event.set('s3_key', s3_file_info[:key])
+          if !metadata[:cloudfront_version].nil?
+            event.set("cloudfront_version", metadata[:cloudfront_version])
+          end
+          if !metadata[:cloudfront_fields].nil?
+            event.set("cloudfront_fields", metadata[:cloudfront_fields])
+          end
           decorate(event)
-
           queue << event
         end
       end #codec
     end #read_file
     @logger.info("Processing downloaded file - Finished at #{Time.now}" , :filename => filename)
+
     return true
   end # def process_local_log
 
 
   def event_is_metadata?(event)
-    return false if event["message"].nil?
-    line = event["message"]
+    return false if event.get("message").nil?
+    line = event.get("message")
     version_metadata?(line) || fields_metadata?(line)
   end
 
@@ -323,7 +322,7 @@ class LogStash::Inputs::S3File_Via_Sqs < LogStash::Inputs::Threadable
   end
 
   def update_metadata(metadata, event)
-    line = event['message'].strip
+    line = event.get('message').strip
 
     if version_metadata?(line)
       metadata[:cloudfront_version] = line.split(/#Version: (.+)/).last
@@ -346,13 +345,19 @@ class LogStash::Inputs::S3File_Via_Sqs < LogStash::Inputs::Threadable
     File.open(filename, 'rb') do |file|
       file.each(&block)
     end
+    #remove the file from the pod
+    system("rm #{filename}")
   end
 
   def read_gzip_file(filename, block)
     begin
-      Zlib::GzipReader.open(filename) do |decoder|
-        decoder.each_line { |line| block.call(line) }
-      end
+      #unzip the file localy in etc/logstash folder
+      command = "gunzip --force #{filename}"
+      string_size = filename.length * -1
+      log_file = filename[string_size..-4]
+      success = system(command)
+      #success && $?.exitstatus == 0
+      read_plain_file(log_file, block)
     rescue Zlib::Error, Zlib::GzipFile::Error => e
       @logger.error("Gzip codec: We cannot uncompress the gzip file", :filename => filename)
       raise e
